@@ -1,3 +1,5 @@
+# Datastar
+
 Minimal fork of Star Federation's [data-star.dev](https://data-star.dev/) adjusted to be used in Bun & Deno:
 
 1. `package.json` at the root of the repo so it can used directly by bun/npm.
