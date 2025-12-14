@@ -2,7 +2,7 @@
   "name": "datastar",
   "author": "Delaney Gillilan",
   "description": "The hypermedia framework.",
-  "version": "1.0.0-RC.4",
+  "version": "1.0.0-RC.7",
   "license": "MIT",
   "private": false,
   "homepage": "https://data-star.dev",
@@ -14,8 +14,8 @@
     "url": "https://github.com/starfederation/datastar/issues"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./plugins": "./src/plugins/index.ts"
+    ".": "./src/engine.ts",
+    "./plugins": "./src/plugins/**/*.ts"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

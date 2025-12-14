@@ -2,31 +2,27 @@
 // Slug: Creates a signal with two-way data binding.
 // Description: Creates a signal (if one doesn’t already exist) and sets up two-way data binding between it and an element’s value.
 
-import { aliasify } from '../../engine/engine'
-import type { AttributePlugin } from '../../engine/types'
-import { pathToObj } from '../../utils/paths'
-import { modifyCasing } from '../../utils/text'
+import { attribute } from '../../engine/engine'
+import { effect, getPath, mergePaths } from '../../engine/signals'
+import type { Paths } from '../../engine/types'
+import { aliasify, modifyCasing } from '../../utils/text'
+
+type SignalFile = {
+  name: string
+  contents: string
+  mime: string
+}
 
 const dataURIRegex = /^data:(?<mime>[^;]+);base64,(?<contents>.*)$/
 const empty = Symbol('empty')
 
-export const Bind: AttributePlugin = {
-  type: 'attribute',
+const aliasedBind = aliasify('bind')
+
+attribute({
   name: 'bind',
-  keyReq: 'exclusive',
-  valReq: 'exclusive',
-  shouldEvaluate: false,
-  onLoad: ({
-    el,
-    key,
-    mods,
-    value,
-    effect,
-    mergePatch,
-    runtimeErr,
-    getPath,
-  }) => {
-    const signalName = key ? modifyCasing(key, mods) : value
+  requirement: 'exclusive',
+  apply({ el, key, mods, value, error }) {
+    const signalName = key != null ? modifyCasing(key, mods) : value
 
     let get = (el: any, type: string) =>
       type === 'number' ? +el.value : el.value
@@ -80,9 +76,7 @@ export const Bind: AttributePlugin = {
         case 'file': {
           const syncSignal = () => {
             const files = [...(el.files || [])]
-            const contents: string[] = []
-            const mimes: string[] = []
-            const names: string[] = []
+            const signalFiles: SignalFile[] = []
             Promise.all(
               files.map(
                 (f) =>
@@ -90,35 +84,28 @@ export const Bind: AttributePlugin = {
                     const reader = new FileReader()
                     reader.onload = () => {
                       if (typeof reader.result !== 'string') {
-                        throw runtimeErr('InvalidFileResultType', {
+                        throw error('InvalidFileResultType', {
                           resultType: typeof reader.result,
                         })
                       }
                       const match = reader.result.match(dataURIRegex)
                       if (!match?.groups) {
-                        throw runtimeErr('InvalidDataUri', {
+                        throw error('InvalidDataUri', {
                           result: reader.result,
                         })
                       }
-                      contents.push(match.groups.contents)
-                      mimes.push(match.groups.mime)
-                      names.push(f.name)
+                      signalFiles.push({
+                        name: f.name,
+                        contents: match.groups.contents,
+                        mime: match.groups.mime,
+                      })
                     }
                     reader.onloadend = () => resolve()
                     reader.readAsDataURL(f)
                   }),
               ),
             ).then(() => {
-              mergePatch(
-                pathToObj(
-                  {},
-                  {
-                    [signalName]: contents,
-                    [`${signalName}Mimes`]: mimes,
-                    [`${signalName}Names`]: names,
-                  },
-                ),
-              )
+              mergePaths([[signalName, signalFiles]])
             })
           }
 
@@ -179,24 +166,25 @@ export const Bind: AttributePlugin = {
       Array.isArray(initialValue) &&
       !(el instanceof HTMLSelectElement && el.multiple)
     ) {
+      const signalNameKebab = key ? key : value!
       const inputs = document.querySelectorAll(
-        `[${aliasify('bind')}-${key}],[${aliasify('bind')}="${value}"]`,
+        `[${aliasedBind}\\:${CSS.escape(signalNameKebab)}],[${aliasedBind}="${CSS.escape(signalNameKebab)}"]`,
       ) as NodeListOf<HTMLInputElement>
 
-      const pathObj: Record<string, string> = {}
+      const paths: Paths = []
       let i = 0
       for (const input of inputs) {
-        pathObj[`${path}.${i}`] = get(input, 'none')
+        paths.push([`${path}.${i}`, get(input, 'none')])
 
         if (el === input) {
           break
         }
         i++
       }
-      mergePatch(pathToObj({}, pathObj), { ifMissing: true })
+      mergePaths(paths, { ifMissing: true })
       path = `${path}.${i}`
     } else {
-      mergePatch(pathToObj({}, { [path]: get(el, type) }), {
+      mergePaths([[path, get(el, type)]], {
         ifMissing: true,
       })
     }
@@ -206,7 +194,7 @@ export const Bind: AttributePlugin = {
       if (signalValue != null) {
         const value = get(el, typeof signalValue)
         if (value !== empty) {
-          mergePatch(pathToObj({}, { [path]: value }))
+          mergePaths([[path, value]])
         }
       }
     }
@@ -223,4 +211,4 @@ export const Bind: AttributePlugin = {
       el.removeEventListener('change', syncSignal)
     }
   },
-}
+})
