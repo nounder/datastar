@@ -1,0 +1,187 @@
+#!/usr/bin/env bun
+import { Glob } from "bun";
+import { cpSync, rmSync, existsSync } from "node:fs";
+import { dirname, relative, join, resolve } from "node:path";
+
+const ROOT = resolve(import.meta.dirname, "..");
+const UPSTREAM_SRC = join(ROOT, "upstream/library/src");
+const DEST_SRC = join(ROOT, "src");
+
+// Path aliases from upstream/library/tsconfig.json
+const PATH_ALIASES: Record<string, string> = {
+  "@engine": "./src/engine/engine.ts",
+  "@engine/*": "./src/engine/*",
+  "@plugins/*": "./src/plugins/*",
+  "@pro/*": "./src/pro/*",
+  "@utils/*": "./src/utils/*",
+};
+
+async function main() {
+  console.log("Building datastar-engine...\n");
+
+  // Step 1: Remove existing src directory if it exists
+  if (existsSync(DEST_SRC)) {
+    console.log("Removing existing src directory...");
+    rmSync(DEST_SRC, { recursive: true });
+  }
+
+  // Step 2: Copy upstream/library/src to ./src (excluding globals.d.ts and tsconfig.json)
+  console.log(`Copying ${UPSTREAM_SRC} to ${DEST_SRC}...`);
+  const EXCLUDED_FILES = ["globals.d.ts", "tsconfig.json"];
+  cpSync(UPSTREAM_SRC, DEST_SRC, {
+    recursive: true,
+    filter: (src) => {
+      const filename = src.split("/").pop() || "";
+      return !EXCLUDED_FILES.includes(filename);
+    },
+  });
+  console.log("Copy complete.\n");
+
+  // Step 3: Find all TypeScript files using Bun.Glob
+  console.log("Scanning for TypeScript files...");
+  const glob = new Glob("**/*.ts");
+  const tsFiles: string[] = [];
+
+  for await (const file of glob.scan({ cwd: DEST_SRC, absolute: true })) {
+    tsFiles.push(file);
+  }
+
+  console.log(`Found ${tsFiles.length} TypeScript files.\n`);
+
+  // Step 4: Process each file and replace aliased imports
+  console.log("Replacing aliased imports with relative paths...\n");
+
+  for (const filePath of tsFiles) {
+    await processFile(filePath);
+  }
+
+  console.log("\nBuild complete!");
+}
+
+async function processFile(filePath: string) {
+  const content = await Bun.file(filePath).text();
+  const fileDir = dirname(filePath);
+
+  let newContent = content;
+  let modified = false;
+
+  // Match import/export statements with aliased paths
+  // Handles: import x from '@alias', import '@alias', export x from '@alias'
+  const importRegex =
+    /(import|export)\s+(?:(?:type\s+)?(?:\{[^}]*\}|[^'"]*)\s+from\s+)?['"](@[^'"]+)['"]/g;
+
+  let match: RegExpExecArray | null;
+  const replacements: Array<{ original: string; replacement: string }> = [];
+
+  while ((match = importRegex.exec(content)) !== null) {
+    const [fullMatch, importExport, aliasedPath] = match;
+
+    const resolvedPath = resolveAlias(aliasedPath, fileDir);
+    if (resolvedPath) {
+      const newMatch = fullMatch.replace(
+        `'${aliasedPath}'`,
+        `'${resolvedPath}'`
+      );
+      const newMatchDouble = fullMatch.replace(
+        `"${aliasedPath}"`,
+        `"${resolvedPath}"`
+      );
+
+      replacements.push({
+        original: fullMatch,
+        replacement: fullMatch.includes(`'${aliasedPath}'`)
+          ? newMatch
+          : newMatchDouble,
+      });
+    }
+  }
+
+  for (const { original, replacement } of replacements) {
+    if (original !== replacement) {
+      newContent = newContent.replace(original, replacement);
+      modified = true;
+    }
+  }
+
+  // Check if file references ALIAS and add const declaration
+  if (/\bALIAS\b/.test(newContent)) {
+    newContent = addAliasDeclaration(newContent);
+    modified = true;
+  }
+
+  if (modified) {
+    await Bun.write(filePath, newContent);
+    const relPath = relative(ROOT, filePath);
+    console.log(`  Updated: ${relPath}`);
+  }
+}
+
+function addAliasDeclaration(content: string): string {
+  // Find the last import/export from statement
+  const importExportRegex = /^(import|export)\s+.*?['"][^'"]+['"];?\s*$/gm;
+  let lastImportEnd = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = importExportRegex.exec(content)) !== null) {
+    lastImportEnd = match.index + match[0].length;
+  }
+
+  if (lastImportEnd === 0) {
+    // No imports found, add at the beginning
+    return `const ALIAS = null\n\n${content}`;
+  }
+
+  // Insert after the last import with surrounding newlines
+  const before = content.slice(0, lastImportEnd);
+  const after = content.slice(lastImportEnd);
+
+  return `${before}\n\nconst ALIAS = null\n${after}`;
+}
+
+function resolveAlias(aliasedPath: string, fromDir: string): string | null {
+  // Check exact match first (e.g., @engine)
+  if (PATH_ALIASES[aliasedPath]) {
+    const targetPath = join(DEST_SRC, PATH_ALIASES[aliasedPath].replace("./src/", ""));
+    return toRelativeImport(fromDir, targetPath);
+  }
+
+  // Check wildcard aliases (e.g., @engine/*, @utils/*)
+  for (const [alias, target] of Object.entries(PATH_ALIASES)) {
+    if (alias.endsWith("/*")) {
+      const aliasPrefix = alias.slice(0, -2); // Remove /*
+
+      if (aliasedPath.startsWith(aliasPrefix + "/")) {
+        const suffix = aliasedPath.slice(aliasPrefix.length + 1);
+        const targetBase = target.replace("./src/", "").replace("/*", "");
+        const targetPath = join(DEST_SRC, targetBase, suffix);
+
+        // Add .ts extension if not present and not a directory
+        const finalPath = targetPath.endsWith(".ts")
+          ? targetPath
+          : targetPath + ".ts";
+
+        return toRelativeImport(fromDir, finalPath);
+      }
+    }
+  }
+
+  return null;
+}
+
+function toRelativeImport(fromDir: string, toFile: string): string {
+  let relativePath = relative(fromDir, toFile);
+
+  // Ensure path starts with ./ or ../
+  if (!relativePath.startsWith(".") && !relativePath.startsWith("/")) {
+    relativePath = "./" + relativePath;
+  }
+
+  // Remove .ts extension for the import
+  if (relativePath.endsWith(".ts")) {
+    relativePath = relativePath.slice(0, -3);
+  }
+
+  return relativePath;
+}
+
+main().catch(console.error);
